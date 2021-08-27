@@ -83,8 +83,8 @@ def _get_aws_client(
             aws_region = azone[:-1]
         except HTTPError as e:
             logging.exception(
-                "Error determining region used for AWS client.  Typo in code?\n\n"
-                + str(e)
+                "Error determining region used for AWS client.  Typo in code?\n\n" +
+                str(e)
             )
             sys.exit(1)
         except URLError:
@@ -418,9 +418,9 @@ def delete_table(conn, sleep_interval: int, table_name: str):
                 time.sleep(sleep_interval)
             except conn.exceptions.ProvisionedThroughputExceededException:
                 logging.info(
-                    "Control plane limit exceeded, retrying deletion of "
-                    + table_name
-                    + ".."
+                    "Control plane limit exceeded, retrying deletion of " +
+                    table_name +
+                    ".."
                 )
                 time.sleep(sleep_interval)
             except conn.exceptions.ResourceInUseException:
@@ -435,11 +435,11 @@ def delete_table(conn, sleep_interval: int, table_name: str):
             try:
                 while True:
                     logging.info(
-                        "Waiting for "
-                        + table_name
-                        + " table to be deleted.. ["
-                        + conn.describe_table(table_name)["Table"]["TableStatus"]
-                        + "]"
+                        "Waiting for " +
+                        table_name +
+                        " table to be deleted.. [" +
+                        conn.describe_table(table_name)["Table"]["TableStatus"] +
+                        "]"
                     )
                     time.sleep(sleep_interval)
             except conn.exceptions.ResourceNotFoundException:
@@ -480,8 +480,8 @@ def batch_write(conn, sleep_interval, table_name, put_requests):
             break
         if len(unprocessed_items) > 0 and i <= MAX_RETRY:
             logging.debug(
-                str(len(unprocessed_items))
-                + " unprocessed items, retrying after %s seconds.. [%s/%s]"
+                str(len(unprocessed_items)) +
+                " unprocessed items, retrying after %s seconds.. [%s/%s]"
                 % (str(sleep), str(i), str(MAX_RETRY))
             )
             request_items = unprocessed_items
@@ -490,8 +490,8 @@ def batch_write(conn, sleep_interval, table_name, put_requests):
             i += 1
         else:
             logging.info(
-                "Max retries reached, failed to processed batch write: "
-                + json.dumps(unprocessed_items, indent=JSON_INDENT)
+                "Max retries reached, failed to processed batch write: " +
+                json.dumps(unprocessed_items, indent=JSON_INDENT)
             )
             logging.info("Ignoring and continuing..")
             break
@@ -504,17 +504,17 @@ def wait_for_active_table(conn, table_name, verb):
 
     while True:
         if (
-            conn.describe_table(TableName=table_name)["Table"]["TableStatus"]
-            != "ACTIVE"
+            conn.describe_table(TableName=table_name)["Table"]["TableStatus"] !=
+            "ACTIVE"
         ):
             logging.info(
-                "Waiting for "
-                + table_name
-                + " table to be "
-                + verb
-                + ".. ["
-                + conn.describe_table(TableName=table_name)["Table"]["TableStatus"]
-                + "]"
+                "Waiting for " +
+                table_name +
+                " table to be " +
+                verb +
+                ".. [" +
+                conn.describe_table(TableName=table_name)["Table"]["TableStatus"] +
+                "]"
             )
             time.sleep(sleep_interval)
         else:
@@ -530,12 +530,12 @@ def update_provisioned_throughput(
     """
 
     logging.info(
-        "Updating "
-        + table_name
-        + " table read capacity to: "
-        + str(read_capacity)
-        + ", write capacity to: "
-        + str(write_capacity)
+        "Updating " +
+        table_name +
+        " table read capacity to: " +
+        str(read_capacity) +
+        ", write capacity to: " +
+        str(write_capacity)
     )
     while True:
         try:
@@ -564,7 +564,7 @@ def update_provisioned_throughput(
         wait_for_active_table(conn, table_name, "updated")
 
 
-def do_empty(dynamo, table_name):
+def do_empty(dynamo, table_name, billing_mode):
     """
     Empty table named table_name
     """
@@ -584,6 +584,13 @@ def do_empty(dynamo, table_name):
     table_global_secondary_indexes = table_desc.get("GlobalSecondaryIndexes")
 
     optional_args = {}
+    if billing_mode == "PROVISIONED":
+        table_provisioned_throughput = {
+            "ReadCapacityUnits": int(original_read_capacity),
+            "WriteCapacityUnits": int(original_write_capacity),
+        }
+        optional_args["ProvisionedThroughput"] = table_provisioned_throughput
+
     if table_local_secondary_indexes is not None:
         optional_args["LocalSecondaryIndexes"] = table_local_secondary_indexes
 
@@ -607,7 +614,7 @@ def do_empty(dynamo, table_name):
                 AttributeDefinitions=table_attribute_definitions,
                 TableName=table_name,
                 KeySchema=table_key_schema,
-                ProvisionedThroughput=table_provisioned_throughput,
+                BillingMode=billing_mode,
                 **optional_args
             )
             break
@@ -616,9 +623,9 @@ def do_empty(dynamo, table_name):
             time.sleep(sleep_interval)
         except dynamo.exceptions.ProvisionedThroughputExceededException:
             logging.info(
-                "Control plane limit exceeded, retrying creation of "
-                + table_name
-                + ".."
+                "Control plane limit exceeded, retrying creation of " +
+                table_name +
+                ".."
             )
             time.sleep(sleep_interval)
         except dynamo.exceptions.ClientError as e:
@@ -629,10 +636,10 @@ def do_empty(dynamo, table_name):
     wait_for_active_table(dynamo, table_name, "created")
 
     logging.info(
-        "Recreation of "
-        + table_name
-        + " completed. Time taken: "
-        + str(datetime.datetime.now().replace(microsecond=0) - start_time)
+        "Recreation of " +
+        table_name +
+        " completed. Time taken: " +
+        str(datetime.datetime.now().replace(microsecond=0) - start_time)
     )
 
 
@@ -674,8 +681,8 @@ def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
 
                 # override table read capacity if specified
                 if (
-                    read_capacity is not None
-                    and read_capacity != original_read_capacity
+                    read_capacity is not None and
+                    read_capacity != original_read_capacity
                 ):
                     update_provisioned_throughput(
                         dynamo, table_name, read_capacity, original_write_capacity
@@ -698,21 +705,21 @@ def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
                         )
                     except dynamo.exceptions.ProvisionedThroughputExceededException:
                         logging.error(
-                            "EXCEEDED THROUGHPUT ON TABLE "
-                            + table_name
-                            + ".  BACKUP FOR IT IS USELESS."
+                            "EXCEEDED THROUGHPUT ON TABLE " +
+                            table_name +
+                            ".  BACKUP FOR IT IS USELESS."
                         )
                         tableQueue.task_done()
 
                     f = open(
-                        args.dumpPath
-                        + os.sep
-                        + table_name
-                        + os.sep
-                        + DATA_DIR
-                        + os.sep
-                        + str(i).zfill(4)
-                        + ".json",
+                        args.dumpPath +
+                        os.sep +
+                        table_name +
+                        os.sep +
+                        DATA_DIR +
+                        os.sep +
+                        str(i).zfill(4) +
+                        ".json",
                         "w+",
                     )
                     del scanned_table["ResponseMetadata"]
@@ -728,8 +735,8 @@ def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
 
                 # revert back to original table read capacity if specified
                 if (
-                    read_capacity is not None
-                    and read_capacity != original_read_capacity
+                    read_capacity is not None and
+                    read_capacity != original_read_capacity
                 ):
                     update_provisioned_throughput(
                         dynamo,
@@ -740,10 +747,10 @@ def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
                     )
 
                 logging.info(
-                    "Backup for "
-                    + table_name
-                    + " table completed. Time taken: "
-                    + str(datetime.datetime.now().replace(microsecond=0) - start_time)
+                    "Backup for " +
+                    table_name +
+                    " table completed. Time taken: " +
+                    str(datetime.datetime.now().replace(microsecond=0) - start_time)
                 )
 
             tableQueue.task_done()
@@ -776,7 +783,14 @@ def prepare_gsi_for_restore(gsi):
     }
 
 
-def do_restore(dynamo, sleep_interval, source_table, destination_table, write_capacity):
+def do_restore(
+    dynamo,
+    sleep_interval,
+    source_table,
+    destination_table,
+    write_capacity,
+    billing_mode,
+):
     """
     Restore table
     """
@@ -863,8 +877,8 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
             original_gsi_read_capacities.append(original_gsi_read_capacity)
 
             if (
-                gsi["ProvisionedThroughput"]["ReadCapacityUnits"]
-                < RESTORE_READ_CAPACITY
+                gsi["ProvisionedThroughput"]["ReadCapacityUnits"] <
+                RESTORE_READ_CAPACITY
             ):
                 gsi["ProvisionedThroughput"][
                     "ReadCapacityUnits"
@@ -876,16 +890,19 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
         "WriteCapacityUnits": int(write_capacity),
     }
 
+    optional_args = {}
+    if billing_mode == "PROVISIONED":
+        optional_args["ProvisionedThroughput"] = table_provisioned_throughput
+
     if not args.dataOnly:
 
         logging.info(
-            "Creating "
-            + destination_table
-            + " table with temp write capacity of "
-            + str(write_capacity)
+            "Creating " +
+            destination_table +
+            " table with temp write capacity of " +
+            str(write_capacity)
         )
 
-        optional_args = {}
         if table_local_secondary_indexes is not None:
             optional_args["LocalSecondaryIndexes"] = table_local_secondary_indexes
 
@@ -900,7 +917,7 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
                     AttributeDefinitions=table_attribute_definitions,
                     TableName=table_table_name,
                     KeySchema=table_key_schema,
-                    ProvisionedThroughput=table_provisioned_throughput,
+                    BillingMode=billing_mode,
                     **optional_args
                 )
                 break
@@ -941,13 +958,13 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
             items = []
             item_data = json.load(
                 open(
-                    dump_data_path
-                    + os.sep
-                    + source_table
-                    + os.sep
-                    + DATA_DIR
-                    + os.sep
-                    + data_file
+                    dump_data_path +
+                    os.sep +
+                    source_table +
+                    os.sep +
+                    DATA_DIR +
+                    os.sep +
+                    data_file
                 )
             )
             items.extend(item_data["Items"])
@@ -960,11 +977,11 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
                 # flush every MAX_BATCH_WRITE
                 if len(put_requests) == MAX_BATCH_WRITE:
                     logging.debug(
-                        "Writing next "
-                        + str(MAX_BATCH_WRITE)
-                        + " items to "
-                        + destination_table
-                        + ".."
+                        "Writing next " +
+                        str(MAX_BATCH_WRITE) +
+                        " items to " +
+                        destination_table +
+                        ".."
                     )
                     batch_write(
                         dynamo,
@@ -983,8 +1000,8 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
         if not args.skipThroughputUpdate:
             # revert to original table write capacity if it has been modified
             if (
-                int(write_capacity) != original_write_capacity
-                or int(read_capacity) != original_read_capacity
+                int(write_capacity) != original_write_capacity or
+                int(read_capacity) != original_read_capacity
             ):
                 update_provisioned_throughput(
                     dynamo,
@@ -1003,8 +1020,8 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
                     original_gsi_write_capacity = original_gsi_write_capacities.pop(0)
                     original_gsi_read_capacity = original_gsi_read_capacities.pop(0)
                     if (
-                        original_gsi_write_capacity != wcu
-                        or original_gsi_read_capacity != rcu
+                        original_gsi_write_capacity != wcu or
+                        original_gsi_read_capacity != rcu
                     ):
                         gsi_data.append(
                             {
@@ -1024,9 +1041,9 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
 
                 if gsi_data:
                     logging.info(
-                        "Updating "
-                        + destination_table
-                        + " global secondary indexes write and read capacities as necessary.."
+                        "Updating " +
+                        destination_table +
+                        " global secondary indexes write and read capacities as necessary.."
                     )
                     while True:
                         try:
@@ -1052,19 +1069,19 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
         wait_for_active_table(dynamo, destination_table, "active")
 
         logging.info(
-            "Restore for "
-            + source_table
-            + " to "
-            + destination_table
-            + " table completed. Time taken: "
-            + str(datetime.datetime.now().replace(microsecond=0) - start_time)
+            "Restore for " +
+            source_table +
+            " to " +
+            destination_table +
+            " table completed. Time taken: " +
+            str(datetime.datetime.now().replace(microsecond=0) - start_time)
         )
     else:
         logging.info(
-            "Empty schema of "
-            + source_table
-            + " table created. Time taken: "
-            + str(datetime.datetime.now().replace(microsecond=0) - start_time)
+            "Empty schema of " +
+            source_table +
+            " table created. Time taken: " +
+            str(datetime.datetime.now().replace(microsecond=0) - start_time)
         )
 
 
@@ -1100,9 +1117,9 @@ def main():
         "-r",
         "--region",
         help="AWS region to use, e.g. 'us-west-1'. "
-        "Can use AWS_DEFAULT_REGION for local testing.  Use '"
-        + LOCAL_REGION
-        + "' for local DynamoDB testing",
+        "Can use AWS_DEFAULT_REGION for local testing.  Use '" +
+        LOCAL_REGION +
+        "' for local DynamoDB testing",
     )
     parser.add_argument(
         "--host", help="Host of local DynamoDB [required only for local]"
@@ -1277,10 +1294,10 @@ def main():
             sys.exit(0)
         else:
             logging.info(
-                "Found "
-                + str(len(matching_backup_tables))
-                + " table(s) in DynamoDB host to backup: "
-                + ", ".join(matching_backup_tables)
+                "Found " +
+                str(len(matching_backup_tables)) +
+                " table(s) in DynamoDB host to backup: " +
+                ", ".join(matching_backup_tables)
             )
 
         try:
@@ -1318,9 +1335,9 @@ def main():
                 logging.info("Backup of table(s) " + args.srcTable + " completed!")
             except (NameError, TypeError):
                 logging.info(
-                    "Backup of table(s) "
-                    + ", ".join(matching_backup_tables)
-                    + " completed!"
+                    "Backup of table(s) " +
+                    ", ".join(matching_backup_tables) +
+                    " completed!"
                 )
 
             if args.archive:
@@ -1358,11 +1375,11 @@ def main():
             )
             delete_str = ": " if args.dataOnly else " to be deleted: "
             logging.info(
-                "Found "
-                + str(len(matching_destination_tables))
-                + " table(s) in DynamoDB host"
-                + delete_str
-                + ", ".join(matching_destination_tables)
+                "Found " +
+                str(len(matching_destination_tables)) +
+                " table(s) in DynamoDB host" +
+                delete_str +
+                ", ".join(matching_destination_tables)
             )
 
             threads = []
@@ -1381,12 +1398,12 @@ def main():
                 args.srcTable, prefix_separator
             )
             logging.info(
-                "Found "
-                + str(len(matching_restore_tables))
-                + " table(s) in "
-                + args.dumpPath
-                + " to restore: "
-                + ", ".join(matching_restore_tables)
+                "Found " +
+                str(len(matching_restore_tables)) +
+                " table(s) in " +
+                args.dumpPath +
+                " to restore: " +
+                ", ".join(matching_restore_tables)
             )
 
             threads = []
@@ -1400,6 +1417,7 @@ def main():
                             source_table,
                             source_table,
                             args.writeCapacity,
+                            args.billingMode,
                         ),
                     )
                 else:
@@ -1416,6 +1434,7 @@ def main():
                                 prefix_separator,
                             ),
                             args.writeCapacity,
+                            args.billingMode,
                         ),
                     )
                 threads.append(t)
@@ -1426,11 +1445,11 @@ def main():
                 thread.join()
 
             logging.info(
-                "Restore of table(s) "
-                + args.srcTable
-                + " to "
-                + dest_table
-                + " completed!"
+                "Restore of table(s) " +
+                args.srcTable +
+                " to " +
+                dest_table +
+                " completed!"
             )
         else:
             delete_table(
@@ -1442,6 +1461,7 @@ def main():
                 source_table=args.srcTable,
                 destination_table=dest_table,
                 write_capacity=args.writeCapacity,
+                billing_mode=args.billingMode,
             )
     elif args.mode == "empty":
         if args.srcTable.find("*") != -1:
@@ -1449,15 +1469,17 @@ def main():
                 conn, args.srcTable, prefix_separator
             )
             logging.info(
-                "Found "
-                + str(len(matching_backup_tables))
-                + " table(s) in DynamoDB host to empty: "
-                + ", ".join(matching_backup_tables)
+                "Found " +
+                str(len(matching_backup_tables)) +
+                " table(s) in DynamoDB host to empty: " +
+                ", ".join(matching_backup_tables)
             )
 
             threads = []
             for table in matching_backup_tables:
-                t = threading.Thread(target=do_empty, args=(conn, table))
+                t = threading.Thread(
+                    target=do_empty, args=(conn, table, args.billingMode)
+                )
                 threads.append(t)
                 t.start()
                 time.sleep(THREAD_START_DELAY)
@@ -1467,7 +1489,7 @@ def main():
 
             logging.info("Empty of table(s) " + args.srcTable + " completed!")
         else:
-            do_empty(conn, args.srcTable)
+            do_empty(conn, args.srcTable, args.billingMode)
 
 
 if __name__ == "__main__":
