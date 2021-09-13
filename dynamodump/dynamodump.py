@@ -641,7 +641,7 @@ def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
     if streams:
         # restore streams
         logging.info("Restoring DynamoDB Streams after restoring Table " + table_name)
-        restore_table_streams(dynamo, lambda_client, streams, table_name)
+        restore_table_streams(args.profile, args.region, streams, table_name)
 
     logging.info(
         "Recreation of " +
@@ -649,6 +649,59 @@ def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
         " completed. Time taken: " +
         str(datetime.datetime.now().replace(microsecond=0) - start_time)
     )
+
+
+def update_role_stream(profile, region, function):
+    """
+    Update lambda function policies to restore DDB streams
+    """
+
+    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
+    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
+
+    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
+    role_name = re.split("/", lambda_function["Role"])[-1]
+    logging.info(
+        "Update linked role {} allow {} to fetch streams.".format(role_name, function)
+    )
+
+    role_policies = iamclient.list_role_policies(
+        RoleName=role_name,
+    )
+
+    for policy in role_policies["PolicyNames"]:
+        policy_document = iamclient.get_role_policy(
+            RoleName=role_name, PolicyName=policy
+        )
+
+        for idx, statement in enumerate(policy_document["PolicyDocument"]["Statement"]):
+            policy_document["PolicyDocument"]["Statement"][idx][
+                "Resource"
+            ] = generate_stream_resource(statement["Resource"])
+
+        iamclient.put_role_policy(
+            RoleName=role_name,
+            PolicyName=policy,
+            PolicyDocument=json.dumps(policy_document["PolicyDocument"]),
+        )
+
+
+def generate_stream_resource(resources):
+    """
+    Reformat resource by removing hardcoded datetime for DDB Streams
+    """
+
+    if type(resources) is str:
+        return re.sub(r"(?i)^(.*)/stream/.*$", r"\1/stream/*", resources)
+    elif type(resources) is list:
+        resources_updated = list()
+        for resource in resources:
+            resources_updated.append(
+                re.sub(r"(?i)^(.*)/stream/.*$", r"\1/stream/*", resource)
+            )
+        return resources_updated
+    else:
+        return resources
 
 
 def get_table_streams(profile, region, table):
@@ -660,10 +713,11 @@ def get_table_streams(profile, region, table):
     dynamodbstreams = _get_aws_client(
         profile=profile, region=region, service="dynamodbstreams"
     )
-    lambdaclient = _get_aws_client(profile=profile, region=region, service="lambda")
+    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
     streams = dynamodbstreams.list_streams(TableName=table)
 
     logging.info("Get streams for {} ...".format(table))
+
     streams_list = dict()
 
     if streams["Streams"]:
@@ -677,7 +731,7 @@ def get_table_streams(profile, region, table):
             ]
 
         for stream in streams["Streams"]:
-            lambda_events = lambdaclient.list_event_source_mappings(
+            lambda_events = lambda_client.list_event_source_mappings(
                 EventSourceArn=stream["StreamArn"]
             )
             for event in lambda_events["EventSourceMappings"]:
@@ -715,10 +769,13 @@ def get_table_streams(profile, region, table):
     return streams_list
 
 
-def restore_table_streams(dynamo, lambda_client, streams, table):
+def restore_table_streams(profile, region, streams, table):
     """
     Restore existing streams of selected table
     """
+
+    dynamo = _get_aws_client(profile=profile, region=region, service="dynamodb")
+    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
 
     if streams["Specification"]:
         dynamo.update_table(
@@ -733,6 +790,8 @@ def restore_table_streams(dynamo, lambda_client, streams, table):
             time.sleep(3)
 
         for stream in streams["Events"]:
+            update_role_stream(profile, region, stream["FunctionName"])
+
             stream["EventSourceArn"] = table_describe["Table"]["LatestStreamArn"]
             lambda_client.create_event_source_mapping(**stream)
             logging.info("Stream {} restored.".format(stream["FunctionName"]))
@@ -1041,7 +1100,7 @@ def do_restore(
             logging.info(
                 "Restoring DynamoDB Streams after restoring Table " + destination_table
             )
-            restore_table_streams(dynamo, lambda_client, streams, destination_table)
+            restore_table_streams(args.profile, args.region, streams, destination_table)
 
     elif not args.skipThroughputUpdate:
         # update provisioned capacity
@@ -1178,7 +1237,7 @@ def do_restore(
             logging.info(
                 "Restoring DynamoDB Streams after restoring Table " + destination_table
             )
-            restore_table_streams(dynamo, lambda_client, streams, destination_table)
+            restore_table_streams(args.profile, args.region, streams, destination_table)
 
         logging.info(
             "Restore for " +
