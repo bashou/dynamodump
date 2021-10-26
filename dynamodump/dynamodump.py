@@ -651,9 +651,69 @@ def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
     )
 
 
-def update_role_stream(profile, region, function):
+def remove_role_stream(profile, region, function, policy_arn):
     """
-    Update lambda function policies to restore DDB streams
+    Remove temporary lambda function policies to restore DDB streams
+    """
+
+    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
+    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
+
+    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
+    role_name = re.split("/", lambda_function["Role"])[-1]
+
+    iamclient.detach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+
+
+def create_tmp_stream_policy(profile, region, stream_arn):
+    """
+    Create temporary policies to restore DDB streams
+    """
+
+    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
+
+    logging.info("Create temporary policy to allow dynamodb streams restoration")
+
+    # Create temporary policy to allow Streams re-creation
+    ddump_managed_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "dynamodb:*",
+                ],
+                "Resource": stream_arn,
+            }
+        ],
+    }
+
+    ddump_role_policy = iamclient.create_policy(
+        PolicyName="temporary_restore_policy",
+        Path="/dynamodump/",
+        PolicyDocument=json.dumps(ddump_managed_policy),
+        Description="DynamoDump Temporary Role (will disappear after restore)",
+        Tags=[],
+    )
+
+    return ddump_role_policy["Policy"]["Arn"]
+
+
+def delete_tmp_stream_policy(profile, region, policy_arn):
+    """
+    Delete temporary policies to restore DDB streams
+    """
+
+    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
+
+    logging.info("Delete temporary policy to allow dynamodb streams restoration")
+
+    iamclient.delete_policy(PolicyArn=policy_arn)
+
+
+def add_role_stream(profile, region, function, policy_arn):
+    """
+    Update temporary policies to restore DDB streams
     """
 
     iamclient = _get_aws_client(profile=profile, region=region, service="iam")
@@ -662,12 +722,31 @@ def update_role_stream(profile, region, function):
     lambda_function = lambda_client.get_function_configuration(FunctionName=function)
     role_name = re.split("/", lambda_function["Role"])[-1]
     logging.info(
-        "Update linked role {} allow {} to fetch streams.".format(role_name, function)
+        "[Temporary Policy] Update linked role {} allow {} to fetch streams.".format(
+            role_name, function
+        )
     )
 
-    role_policies = iamclient.list_role_policies(
-        RoleName=role_name,
+    iamclient.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+
+
+def update_existing_policies(profile, region, function, stream_arn):
+    """
+    Update existing lambda function policies to fit with new stream ARN
+    """
+
+    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
+    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
+
+    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
+    role_name = re.split("/", lambda_function["Role"])[-1]
+    logging.info(
+        "[Existing Policies] Update linked role {} allow {} to fetch streams.".format(
+            role_name, function
+        )
     )
+
+    role_policies = iamclient.list_role_policies(RoleName=role_name)
 
     for policy in role_policies["PolicyNames"]:
         policy_document = iamclient.get_role_policy(
@@ -677,7 +756,7 @@ def update_role_stream(profile, region, function):
         for idx, statement in enumerate(policy_document["PolicyDocument"]["Statement"]):
             policy_document["PolicyDocument"]["Statement"][idx][
                 "Resource"
-            ] = generate_stream_resource(statement["Resource"])
+            ] = update_stream_resource(statement["Resource"], stream_arn)
 
         iamclient.put_role_policy(
             RoleName=role_name,
@@ -686,19 +765,21 @@ def update_role_stream(profile, region, function):
         )
 
 
-def generate_stream_resource(resources):
+def update_stream_resource(resources, stream_arn):
     """
-    Reformat resource by removing hardcoded datetime for DDB Streams
+    Reformat resource by updating old stream ARN with new one
     """
 
-    if type(resources) is str:
-        return re.sub(r"(?i)^(.*)/stream/.*$", r"\1/stream/*", resources)
+    if type(resources) is str and resources.startswith(stream_arn.rsplit("/", 1)[0]):
+
+        return stream_arn
     elif type(resources) is list:
         resources_updated = list()
         for resource in resources:
-            resources_updated.append(
-                re.sub(r"(?i)^(.*)/stream/.*$", r"\1/stream/*", resource)
-            )
+            if resource.startswith(stream_arn.rsplit("/", 1)[0]):
+                resources_updated.append(stream_arn)
+            else:
+                resources_updated.append(resource)
         return resources_updated
     else:
         return resources
@@ -736,37 +817,55 @@ def get_table_streams(profile, region, table):
             )
             for event in lambda_events["EventSourceMappings"]:
                 if event["State"] == "Enabled":
-                    logging.warning(
-                        "Currently streamed to : {} (Status: {})".format(
-                            event["FunctionArn"],
-                            event["State"],
-                        )
-                    )
-
                     # Check if DestinationConfig is Valid
                     destination_config = dict()
                     if event["DestinationConfig"]["OnFailure"]:
                         destination_config = event["DestinationConfig"]
 
-                    streams_list["Events"].append(
-                        {
-                            "StartingPosition": event["StartingPosition"],
-                            "FunctionName": event["FunctionArn"],
-                            "Enabled": True,
-                            "DestinationConfig": destination_config,
-                            "MaximumRecordAgeInSeconds": event[
-                                "MaximumRecordAgeInSeconds"
-                            ],
-                            "MaximumRetryAttempts": event["MaximumRetryAttempts"],
-                            "TumblingWindowInSeconds": event["TumblingWindowInSeconds"],
-                            "FunctionResponseTypes": event["FunctionResponseTypes"],
-                            "BisectBatchOnFunctionError": event[
-                                "BisectBatchOnFunctionError"
-                            ],
-                            "BatchSize": event["BatchSize"],
-                        }
-                    )
+                    if not check_stream_existance(
+                        streams_list["Events"], event["FunctionArn"]
+                    ):
+                        streams_list["Events"].append(
+                            {
+                                "StartingPosition": event["StartingPosition"],
+                                "FunctionName": event["FunctionArn"],
+                                "Enabled": True,
+                                "DestinationConfig": destination_config,
+                                "MaximumRecordAgeInSeconds": event[
+                                    "MaximumRecordAgeInSeconds"
+                                ],
+                                "MaximumRetryAttempts": event["MaximumRetryAttempts"],
+                                "TumblingWindowInSeconds": event[
+                                    "TumblingWindowInSeconds"
+                                ],
+                                "FunctionResponseTypes": event["FunctionResponseTypes"],
+                                "BisectBatchOnFunctionError": event[
+                                    "BisectBatchOnFunctionError"
+                                ],
+                                "BatchSize": event["BatchSize"],
+                            }
+                        )
+
+    for stream in streams_list["Events"]:
+        logging.warning(
+            "Currently streamed to : {} (Status: {})".format(
+                stream["FunctionName"],
+                stream["Enabled"],
+            )
+        )
+
     return streams_list
+
+
+def check_stream_existance(events, function_name):
+    """
+    Check if event already exist in list
+    """
+
+    for event in events:
+        if event["FunctionName"] == function_name:
+            return True
+    return False
 
 
 def restore_table_streams(profile, region, streams, table):
@@ -778,23 +877,46 @@ def restore_table_streams(profile, region, streams, table):
     lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
 
     if streams["Specification"]:
-        dynamo.update_table(
-            TableName=table, StreamSpecification=streams["Specification"]
-        )
+        table_fetch = dynamo.describe_table(TableName=table)
+        if "StreamSpecification" not in table_fetch["Table"]:
+            dynamo.update_table(
+                TableName=table, StreamSpecification=streams["Specification"]
+            )
 
         # wait until LatestStreamArn available
+        table_describe = dynamo.describe_table(TableName=table)
         while True:
-            table_describe = dynamo.describe_table(TableName=table)
             if "LatestStreamArn" in table_describe["Table"]:
+                logging.info(
+                    "LatestStreamArn: {}".format(
+                        table_describe["Table"]["LatestStreamArn"]
+                    )
+                )
                 break
-            time.sleep(3)
+            logging.warning("Waiting for 'LatestStreamArn' to be populated ...")
 
+        # policy_arn = create_tmp_stream_policy(
+        #    profile, region, table_describe["Table"]["LatestStreamArn"])
         for stream in streams["Events"]:
-            update_role_stream(profile, region, stream["FunctionName"])
-
             stream["EventSourceArn"] = table_describe["Table"]["LatestStreamArn"]
-            lambda_client.create_event_source_mapping(**stream)
-            logging.info("Stream {} restored.".format(stream["FunctionName"]))
+            update_existing_policies(
+                profile, region, stream["FunctionName"], stream["EventSourceArn"]
+            )
+            # add_role_stream(
+            #     profile, region, stream["FunctionName"], policy_arn
+            # )
+
+            while True:
+                try:
+                    lambda_client.create_event_source_mapping(**stream)
+                    logging.info("Stream {} restored.".format(stream["FunctionName"]))
+                    break
+                except lambda_client.exceptions.InvalidParameterValueException:
+                    logging.warning("Waiting for IAM rules to apply ...")
+                    time.sleep(3)
+                    continue
+                    # remove_role_stream(profile, region, stream["FunctionName"], policy_arn)
+        # delete_tmp_stream_policy(profile, region, policy_arn)
 
 
 def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
@@ -1095,13 +1217,6 @@ def do_restore(
         # wait for table creation completion
         wait_for_active_table(dynamo, destination_table, "created")
 
-        if streams:
-            # restore streams
-            logging.info(
-                "Restoring DynamoDB Streams after restoring Table " + destination_table
-            )
-            restore_table_streams(args.profile, args.region, streams, destination_table)
-
     elif not args.skipThroughputUpdate:
         # update provisioned capacity
         if int(write_capacity) > original_write_capacity:
@@ -1232,13 +1347,6 @@ def do_restore(
         # wait for table to become active
         wait_for_active_table(dynamo, destination_table, "active")
 
-        if streams:
-            # restore streams
-            logging.info(
-                "Restoring DynamoDB Streams after restoring Table " + destination_table
-            )
-            restore_table_streams(args.profile, args.region, streams, destination_table)
-
         logging.info(
             "Restore for " +
             source_table +
@@ -1254,6 +1362,13 @@ def do_restore(
             " table created. Time taken: " +
             str(datetime.datetime.now().replace(microsecond=0) - start_time)
         )
+
+    if streams:
+        # restore streams
+        logging.info(
+            "Restoring DynamoDB Streams after restoring Table " + destination_table
+        )
+        restore_table_streams(args.profile, args.region, streams, destination_table)
 
 
 def main():
