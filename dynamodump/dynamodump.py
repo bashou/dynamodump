@@ -33,10 +33,7 @@ AWS_SLEEP_INTERVAL = 10  # seconds
 BATCH_WRITE_SLEEP_INTERVAL = 0.15  # seconds
 DATA_DIR = "data"
 DATA_DUMP = "dump"
-
-PROVISIONED_BILLING_MODE = "PROVISIONED"
-PAY_PER_REQUEST_BILLING_MODE = "PAY_PER_REQUEST"
-
+BILLING_MODE = "PROVISIONNED"
 DEFAULT_PREFIX_SEPARATOR = "-"
 CURRENT_WORKING_DIR = os.getcwd()
 JSON_INDENT = 2
@@ -48,6 +45,7 @@ MAX_NUMBER_BACKUP_WORKERS = 25
 MAX_RETRY = 6
 METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 RESTORE_WRITE_CAPACITY = 25
+RESTORE_READ_CAPACITY = 25
 SCHEMA_FILE = "schema.json"
 THREAD_START_DELAY = 1  # seconds
 
@@ -402,7 +400,7 @@ def delete_table(conn, sleep_interval: int, table_name: str):
                 "About to delete table {}. Type 'yes' to continue: ".format(table_name)
             )
             if confirmation != "yes":
-                logging.warning("Confirmation not received. Stopping.")
+                logging.warn("Confirmation not received. Stopping.")
                 sys.exit(1)
         while True:
             # delete table if exists
@@ -566,7 +564,7 @@ def update_provisioned_throughput(
         wait_for_active_table(conn, table_name, "updated")
 
 
-def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
+def do_empty(dynamo, table_name, billing_mode):
     """
     Empty table named table_name
     """
@@ -586,7 +584,7 @@ def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
     table_global_secondary_indexes = table_desc.get("GlobalSecondaryIndexes")
 
     optional_args = {}
-    if billing_mode == PROVISIONED_BILLING_MODE:
+    if billing_mode == "PROVISIONED":
         table_provisioned_throughput = {
             "ReadCapacityUnits": int(original_read_capacity),
             "WriteCapacityUnits": int(original_write_capacity),
@@ -637,285 +635,12 @@ def do_empty(dynamo, table_name, billing_mode, streams, lambda_client):
     # wait for table creation completion
     wait_for_active_table(dynamo, table_name, "created")
 
-    if streams:
-        # restore streams
-        logging.info("Restoring DynamoDB Streams after restoring Table " + table_name)
-        restore_table_streams(args.profile, args.region, streams, table_name)
-
     logging.info(
         "Recreation of "
         + table_name
         + " completed. Time taken: "
         + str(datetime.datetime.now().replace(microsecond=0) - start_time)
     )
-
-
-def remove_role_stream(profile, region, function, policy_arn):
-    """
-    Remove temporary lambda function policies to restore DDB streams
-    """
-
-    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
-    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
-
-    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
-    role_name = re.split("/", lambda_function["Role"])[-1]
-
-    iamclient.detach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
-
-
-def create_tmp_stream_policy(profile, region, stream_arn):
-    """
-    Create temporary policies to restore DDB streams
-    """
-
-    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
-
-    logging.info("Create temporary policy to allow dynamodb streams restoration")
-
-    # Create temporary policy to allow Streams re-creation
-    ddump_managed_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "dynamodb:*",
-                ],
-                "Resource": stream_arn,
-            }
-        ],
-    }
-
-    ddump_role_policy = iamclient.create_policy(
-        PolicyName="temporary_restore_policy",
-        Path="/dynamodump/",
-        PolicyDocument=json.dumps(ddump_managed_policy),
-        Description="DynamoDump Temporary Role (will disappear after restore)",
-        Tags=[],
-    )
-
-    return ddump_role_policy["Policy"]["Arn"]
-
-
-def delete_tmp_stream_policy(profile, region, policy_arn):
-    """
-    Delete temporary policies to restore DDB streams
-    """
-
-    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
-
-    logging.info("Delete temporary policy to allow dynamodb streams restoration")
-
-    iamclient.delete_policy(PolicyArn=policy_arn)
-
-
-def add_role_stream(profile, region, function, policy_arn):
-    """
-    Update temporary policies to restore DDB streams
-    """
-
-    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
-    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
-
-    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
-    role_name = re.split("/", lambda_function["Role"])[-1]
-    logging.info(
-        "[Temporary Policy] Update linked role {} allow {} to fetch streams.".format(
-            role_name, function
-        )
-    )
-
-    iamclient.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
-
-
-def update_existing_policies(profile, region, function, stream_arn):
-    """
-    Update existing lambda function policies to fit with new stream ARN
-    """
-
-    iamclient = _get_aws_client(profile=profile, region=region, service="iam")
-    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
-
-    lambda_function = lambda_client.get_function_configuration(FunctionName=function)
-    role_name = re.split("/", lambda_function["Role"])[-1]
-    logging.info(
-        "[Existing Policies] Update linked role {} allow {} to fetch streams.".format(
-            role_name, function
-        )
-    )
-
-    role_policies = iamclient.list_role_policies(RoleName=role_name)
-
-    for policy in role_policies["PolicyNames"]:
-        policy_document = iamclient.get_role_policy(
-            RoleName=role_name, PolicyName=policy
-        )
-
-        for idx, statement in enumerate(policy_document["PolicyDocument"]["Statement"]):
-            policy_document["PolicyDocument"]["Statement"][idx][
-                "Resource"
-            ] = update_stream_resource(statement["Resource"], stream_arn)
-
-        iamclient.put_role_policy(
-            RoleName=role_name,
-            PolicyName=policy,
-            PolicyDocument=json.dumps(policy_document["PolicyDocument"]),
-        )
-
-
-def update_stream_resource(resources, stream_arn):
-    """
-    Reformat resource by updating old stream ARN with new one
-    """
-
-    if type(resources) is str and resources.startswith(stream_arn.rsplit("/", 1)[0]):
-
-        return stream_arn
-    elif type(resources) is list:
-        resources_updated = list()
-        for resource in resources:
-            if resource.startswith(stream_arn.rsplit("/", 1)[0]):
-                resources_updated.append(stream_arn)
-            else:
-                resources_updated.append(resource)
-        return resources_updated
-    else:
-        return resources
-
-
-def get_table_streams(profile, region, table):
-    """
-    Fetch all defined streams of selected table
-    """
-
-    dynamo = _get_aws_client(profile=profile, region=region, service="dynamodb")
-    dynamodbstreams = _get_aws_client(
-        profile=profile, region=region, service="dynamodbstreams"
-    )
-    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
-    streams = dynamodbstreams.list_streams(TableName=table)
-
-    logging.info("Get streams for {} ...".format(table))
-
-    streams_list = dict()
-
-    if streams["Streams"]:
-        table_describe = dynamo.describe_table(TableName=table)
-        streams_list["Events"] = list()
-
-        streams_list["Specification"] = dict()
-        if "StreamSpecification" in table_describe["Table"]:
-            streams_list["Specification"] = table_describe["Table"][
-                "StreamSpecification"
-            ]
-
-        for stream in streams["Streams"]:
-            lambda_events = lambda_client.list_event_source_mappings(
-                EventSourceArn=stream["StreamArn"]
-            )
-            for event in lambda_events["EventSourceMappings"]:
-                if event["State"] == "Enabled":
-                    # Check if DestinationConfig is Valid
-                    destination_config = dict()
-                    if event["DestinationConfig"]["OnFailure"]:
-                        destination_config = event["DestinationConfig"]
-
-                    if not check_stream_existance(
-                        streams_list["Events"], event["FunctionArn"]
-                    ):
-                        streams_list["Events"].append(
-                            {
-                                "StartingPosition": event["StartingPosition"],
-                                "FunctionName": event["FunctionArn"],
-                                "Enabled": True,
-                                "DestinationConfig": destination_config,
-                                "MaximumRecordAgeInSeconds": event[
-                                    "MaximumRecordAgeInSeconds"
-                                ],
-                                "MaximumRetryAttempts": event["MaximumRetryAttempts"],
-                                "TumblingWindowInSeconds": event[
-                                    "TumblingWindowInSeconds"
-                                ],
-                                "FunctionResponseTypes": event["FunctionResponseTypes"],
-                                "BisectBatchOnFunctionError": event[
-                                    "BisectBatchOnFunctionError"
-                                ],
-                                "BatchSize": event["BatchSize"],
-                            }
-                        )
-
-    for stream in streams_list["Events"]:
-        logging.warning(
-            "Currently streamed to : {} (Status: {})".format(
-                stream["FunctionName"],
-                stream["Enabled"],
-            )
-        )
-
-    return streams_list
-
-
-def check_stream_existance(events, function_name):
-    """
-    Check if event already exist in list
-    """
-
-    for event in events:
-        if event["FunctionName"] == function_name:
-            return True
-    return False
-
-
-def restore_table_streams(profile, region, streams, table):
-    """
-    Restore existing streams of selected table
-    """
-
-    dynamo = _get_aws_client(profile=profile, region=region, service="dynamodb")
-    lambda_client = _get_aws_client(profile=profile, region=region, service="lambda")
-
-    if streams["Specification"]:
-        table_fetch = dynamo.describe_table(TableName=table)
-        if "StreamSpecification" not in table_fetch["Table"]:
-            dynamo.update_table(
-                TableName=table, StreamSpecification=streams["Specification"]
-            )
-
-        # wait until LatestStreamArn available
-        table_describe = dynamo.describe_table(TableName=table)
-        while True:
-            if "LatestStreamArn" in table_describe["Table"]:
-                logging.info(
-                    "LatestStreamArn: {}".format(
-                        table_describe["Table"]["LatestStreamArn"]
-                    )
-                )
-                break
-            logging.warning("Waiting for 'LatestStreamArn' to be populated ...")
-
-        # policy_arn = create_tmp_stream_policy(
-        #    profile, region, table_describe["Table"]["LatestStreamArn"])
-        for stream in streams["Events"]:
-            stream["EventSourceArn"] = table_describe["Table"]["LatestStreamArn"]
-            update_existing_policies(
-                profile, region, stream["FunctionName"], stream["EventSourceArn"]
-            )
-            # add_role_stream(
-            #     profile, region, stream["FunctionName"], policy_arn
-            # )
-
-            while True:
-                try:
-                    lambda_client.create_event_source_mapping(**stream)
-                    logging.info("Stream {} restored.".format(stream["FunctionName"]))
-                    break
-                except lambda_client.exceptions.InvalidParameterValueException:
-                    logging.warning("Waiting for IAM rules to apply ...")
-                    time.sleep(3)
-                    continue
-                    # remove_role_stream(profile, region, stream["FunctionName"], policy_arn)
-        # delete_tmp_stream_policy(profile, region, policy_arn)
 
 
 def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
@@ -1031,6 +756,33 @@ def do_backup(dynamo, read_capacity, tableQueue=None, srcTable=None):
             tableQueue.task_done()
 
 
+def prepare_provisioned_throughput_for_restore(provisioned_throughput):
+    """
+    This function makes sure that the payload returned for the boto3 API call create_table is compatible
+    with the provisioned throughput attribute
+    See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb.html
+    """
+    return {
+        "ReadCapacityUnits": provisioned_throughput["ReadCapacityUnits"],
+        "WriteCapacityUnits": provisioned_throughput["WriteCapacityUnits"],
+    }
+
+
+def prepare_gsi_for_restore(gsi):
+    """
+    This function makes sure that the payload returned for the boto3 API call create_table is compatible
+    See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb.html
+    """
+    return {
+        "IndexName": gsi["IndexName"],
+        "KeySchema": gsi["KeySchema"],
+        "Projection": gsi["Projection"],
+        "ProvisionedThroughput": prepare_provisioned_throughput_for_restore(
+            gsi["ProvisionedThroughput"]
+        ),
+    }
+
+
 def do_restore(
     dynamo,
     sleep_interval,
@@ -1038,8 +790,6 @@ def do_restore(
     destination_table,
     write_capacity,
     billing_mode,
-    streams,
-    lambda_client,
 ):
     """
     Restore table
@@ -1085,26 +835,63 @@ def do_restore(
         else:
             write_capacity = original_write_capacity
 
+    if original_write_capacity == 0:
+        original_write_capacity = RESTORE_WRITE_CAPACITY
+
+    # ensure that read capacity is at least RESTORE_READ_CAPACITY
+    if original_read_capacity < RESTORE_READ_CAPACITY:
+        read_capacity = RESTORE_WRITE_CAPACITY
+    else:
+        read_capacity = original_read_capacity
+
+    if original_read_capacity == 0:
+        original_read_capacity = RESTORE_READ_CAPACITY
+
     # override GSI write capacities if specified, else use RESTORE_WRITE_CAPACITY if original
     # write capacity is lower
     original_gsi_write_capacities = []
+    original_gsi_read_capacities = []
     if table_global_secondary_indexes is not None:
         for gsi in table_global_secondary_indexes:
-            original_gsi_write_capacities.append(
-                gsi["ProvisionedThroughput"]["WriteCapacityUnits"]
-            )
+            # keeps track of original gsi write capacity units. If provisioned capacity is 0, set to
+            # RESTORE_WRITE_CAPACITY as fallback given that 0 is not allowed for write capacities
+            original_gsi_write_capacity = gsi["ProvisionedThroughput"][
+                "WriteCapacityUnits"
+            ]
+            if original_gsi_write_capacity == 0:
+                original_gsi_write_capacity = RESTORE_WRITE_CAPACITY
+
+            original_gsi_write_capacities.append(original_gsi_write_capacity)
 
             if gsi["ProvisionedThroughput"]["WriteCapacityUnits"] < int(write_capacity):
                 gsi["ProvisionedThroughput"]["WriteCapacityUnits"] = int(write_capacity)
 
+            # keeps track of original gsi read capacity units. If provisioned capacity is 0, set to
+            # RESTORE_READ_CAPACITY as fallback given that 0 is not allowed for read capacities
+            original_gsi_read_capacity = gsi["ProvisionedThroughput"][
+                "ReadCapacityUnits"
+            ]
+            if original_gsi_read_capacity == 0:
+                original_gsi_read_capacity = RESTORE_READ_CAPACITY
+
+            original_gsi_read_capacities.append(original_gsi_read_capacity)
+
+            if (
+                gsi["ProvisionedThroughput"]["ReadCapacityUnits"]
+                < RESTORE_READ_CAPACITY
+            ):
+                gsi["ProvisionedThroughput"][
+                    "ReadCapacityUnits"
+                ] = RESTORE_READ_CAPACITY
+
     # temp provisioned throughput for restore
     table_provisioned_throughput = {
-        "ReadCapacityUnits": int(original_read_capacity),
+        "ReadCapacityUnits": int(read_capacity),
         "WriteCapacityUnits": int(write_capacity),
     }
 
     optional_args = {}
-    if billing_mode == PROVISIONED_BILLING_MODE:
+    if billing_mode == "PROVISIONED":
         optional_args["ProvisionedThroughput"] = table_provisioned_throughput
 
     if not args.dataOnly:
@@ -1120,7 +907,9 @@ def do_restore(
             optional_args["LocalSecondaryIndexes"] = table_local_secondary_indexes
 
         if table_global_secondary_indexes is not None:
-            optional_args["GlobalSecondaryIndexes"] = table_global_secondary_indexes
+            optional_args["GlobalSecondaryIndexes"] = [
+                prepare_gsi_for_restore(gsi) for gsi in table_global_secondary_indexes
+            ]
 
         while True:
             try:
@@ -1149,7 +938,6 @@ def do_restore(
 
         # wait for table creation completion
         wait_for_active_table(dynamo, destination_table, "created")
-
     elif not args.skipThroughputUpdate:
         # update provisioned capacity
         if int(write_capacity) > original_write_capacity:
@@ -1211,7 +999,10 @@ def do_restore(
 
         if not args.skipThroughputUpdate:
             # revert to original table write capacity if it has been modified
-            if int(write_capacity) != original_write_capacity:
+            if (
+                int(write_capacity) != original_write_capacity
+                or int(read_capacity) != original_read_capacity
+            ):
                 update_provisioned_throughput(
                     dynamo,
                     destination_table,
@@ -1227,13 +1018,19 @@ def do_restore(
                     wcu = gsi["ProvisionedThroughput"]["WriteCapacityUnits"]
                     rcu = gsi["ProvisionedThroughput"]["ReadCapacityUnits"]
                     original_gsi_write_capacity = original_gsi_write_capacities.pop(0)
-                    if original_gsi_write_capacity != wcu:
+                    original_gsi_read_capacity = original_gsi_read_capacities.pop(0)
+                    if (
+                        original_gsi_write_capacity != wcu
+                        or original_gsi_read_capacity != rcu
+                    ):
                         gsi_data.append(
                             {
                                 "Update": {
                                     "IndexName": gsi["IndexName"],
                                     "ProvisionedThroughput": {
-                                        "ReadCapacityUnits": int(rcu),
+                                        "ReadCapacityUnits": int(
+                                            original_gsi_read_capacity
+                                        ),
                                         "WriteCapacityUnits": int(
                                             original_gsi_write_capacity
                                         ),
@@ -1242,30 +1039,31 @@ def do_restore(
                             }
                         )
 
-                logging.info(
-                    "Updating "
-                    + destination_table
-                    + " global secondary indexes write capacities as necessary.."
-                )
-                while True:
-                    try:
-                        dynamo.update_table(
-                            TableName=destination_table,
-                            global_secondary_index_updates=gsi_data,
-                        )
-                        break
-                    except dynamo.exceptions.LimitExceededException:
-                        logging.info(
-                            "Limit exceeded, retrying updating throughput of"
-                            "GlobalSecondaryIndexes in " + destination_table + ".."
-                        )
-                        time.sleep(sleep_interval)
-                    except dynamo.exceptions.ProvisionedThroughputExceededException:
-                        logging.info(
-                            "Control plane limit exceeded, retrying updating throughput of"
-                            "GlobalSecondaryIndexes in " + destination_table + ".."
-                        )
-                        time.sleep(sleep_interval)
+                if gsi_data:
+                    logging.info(
+                        "Updating "
+                        + destination_table
+                        + " global secondary indexes write and read capacities as necessary.."
+                    )
+                    while True:
+                        try:
+                            dynamo.update_table(
+                                TableName=destination_table,
+                                GlobalSecondaryIndexUpdates=gsi_data,
+                            )
+                            break
+                        except dynamo.exceptions.LimitExceededException:
+                            logging.info(
+                                "Limit exceeded, retrying updating throughput of"
+                                "GlobalSecondaryIndexes in " + destination_table + ".."
+                            )
+                            time.sleep(sleep_interval)
+                        except dynamo.exceptions.ProvisionedThroughputExceededException:
+                            logging.info(
+                                "Control plane limit exceeded, retrying updating throughput of"
+                                "GlobalSecondaryIndexes in " + destination_table + ".."
+                            )
+                            time.sleep(sleep_interval)
 
         # wait for table to become active
         wait_for_active_table(dynamo, destination_table, "active")
@@ -1285,13 +1083,6 @@ def do_restore(
             + " table created. Time taken: "
             + str(datetime.datetime.now().replace(microsecond=0) - start_time)
         )
-
-    if streams:
-        # restore streams
-        logging.info(
-            "Restoring DynamoDB Streams after restoring Table " + destination_table
-        )
-        restore_table_streams(args.profile, args.region, streams, destination_table)
 
 
 def main():
@@ -1416,12 +1207,6 @@ def main():
         help="Skip updating throughput values across tables [optional]",
     )
     parser.add_argument(
-        "--skipStreams",
-        action="store_true",
-        default=False,
-        help="Skip DynamoDB Streams re-creation after restore [optional]",
-    )
-    parser.add_argument(
         "--dumpPath",
         help="Directory to place and search for DynamoDB table "
         "backups (defaults to use '" + str(DATA_DUMP) + "') [optional]",
@@ -1429,15 +1214,10 @@ def main():
     )
     parser.add_argument(
         "--billingMode",
-        help="Set billing mode between "
-        + str(PROVISIONED_BILLING_MODE)
-        + "|"
-        + str(PAY_PER_REQUEST_BILLING_MODE)
-        + " (defaults to use '"
-        + str(PROVISIONED_BILLING_MODE)
-        + "') [optional]",
-        choices=[PROVISIONED_BILLING_MODE, PAY_PER_REQUEST_BILLING_MODE],
-        default=str(PROVISIONED_BILLING_MODE),
+        help="Set billing mode between PROVISIONNED|PAY_PER_REQUEST "
+        " (defaults to use '" + str(BILLING_MODE) + "') [optional]",
+        choices=["PROVISIONNED", "PAY_PER_REQUEST"],
+        default=str(BILLING_MODE),
     )
     parser.add_argument(
         "--log", help="Logging level - DEBUG|INFO|WARNING|ERROR|CRITICAL " "[optional]"
@@ -1463,15 +1243,6 @@ def main():
             secret_key=args.secretKey,
             region=args.region,
         )
-
-        # client for lambda streams actions
-        lambda_client = _get_aws_client(
-            service="lambda",
-            access_key=args.accessKey,
-            secret_key=args.secretKey,
-            region=args.region,
-        )
-
         sleep_interval = LOCAL_SLEEP_INTERVAL
     else:
         if not args.profile:
@@ -1481,15 +1252,6 @@ def main():
                 secret_key=args.secretKey,
                 region=args.region,
             )
-
-            # client for lambda streams actions
-            lambda_client = _get_aws_client(
-                service="lambda",
-                access_key=args.accessKey,
-                secret_key=args.secretKey,
-                region=args.region,
-            )
-
             sleep_interval = AWS_SLEEP_INTERVAL
         else:
             conn = _get_aws_client(
@@ -1497,14 +1259,6 @@ def main():
                 profile=args.profile,
                 region=args.region,
             )
-
-            # client for lambda streams actions
-            lambda_client = _get_aws_client(
-                service="lambda",
-                profile=args.profile,
-                region=args.region,
-            )
-
             sleep_interval = AWS_SLEEP_INTERVAL
 
     # don't proceed if connection is not established
@@ -1654,10 +1408,6 @@ def main():
 
             threads = []
             for source_table in matching_restore_tables:
-                streams = []
-                if not args.skipStreams:
-                    streams = get_table_streams(args.profile, args.region, source_table)
-
                 if args.srcTable == "*":
                     t = threading.Thread(
                         target=do_restore,
@@ -1668,8 +1418,6 @@ def main():
                             source_table,
                             args.writeCapacity,
                             args.billingMode,
-                            streams,
-                            lambda_client,
                         ),
                     )
                 else:
@@ -1687,8 +1435,6 @@ def main():
                             ),
                             args.writeCapacity,
                             args.billingMode,
-                            streams,
-                            lambda_client,
                         ),
                     )
                 threads.append(t)
@@ -1706,10 +1452,6 @@ def main():
                 + " completed!"
             )
         else:
-            streams = []
-            if not args.skipStreams:
-                streams = get_table_streams(args.profile, args.region, dest_table)
-
             delete_table(
                 conn=conn, sleep_interval=sleep_interval, table_name=dest_table
             )
@@ -1720,8 +1462,6 @@ def main():
                 destination_table=dest_table,
                 write_capacity=args.writeCapacity,
                 billing_mode=args.billingMode,
-                streams=streams,
-                lambda_client=lambda_client,
             )
     elif args.mode == "empty":
         if args.srcTable.find("*") != -1:
@@ -1737,13 +1477,8 @@ def main():
 
             threads = []
             for table in matching_backup_tables:
-                streams = []
-                if not args.skipStreams:
-                    streams = get_table_streams(args.profile, args.region, table)
-
                 t = threading.Thread(
-                    target=do_empty,
-                    args=(conn, table, args.billingMode, streams, lambda_client),
+                    target=do_empty, args=(conn, table, args.billingMode)
                 )
                 threads.append(t)
                 t.start()
@@ -1754,11 +1489,7 @@ def main():
 
             logging.info("Empty of table(s) " + args.srcTable + " completed!")
         else:
-            streams = []
-            if not args.skipStreams:
-                streams = get_table_streams(args.profile, args.region, args.srcTable)
-
-            do_empty(conn, args.srcTable, args.billingMode, streams, lambda_client)
+            do_empty(conn, args.srcTable, args.billingMode)
 
 
 if __name__ == "__main__":
